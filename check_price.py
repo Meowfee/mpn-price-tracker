@@ -1,9 +1,15 @@
 """
 Daily price-change logger for Coles and Woolworths (via RapidAPI).
 
+Tracked products are read from the "Main" tab of the same Google Sheet --
+column A: item name, column B: category (unused), column C: Coles product
+ID, column D: Woolworths product ID. Row 1 is assumed to be a header row;
+products start at row 2. Add a new row there to track a new product --
+no code changes needed.
+
 For each tracked product, checks yesterday's "price changes" feed from both
-retailers. If a tracked product shows up (meaning its price moved), a row is
-appended to the Google Sheet. Products that didn't change price that day are
+retailers. If a tracked product shows up (its price moved), a row is
+appended to the log tab. Products that didn't change price that day are
 left alone -- this is a log-on-change history, not a daily snapshot.
 """
 
@@ -17,24 +23,11 @@ import requests
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 
-# ---------------------------------------------------------------------------
-# Products being tracked. Add more entries here later -- this POC has just one.
-# `woolworths_id` / `coles_id` are the static numeric product IDs pulled from
-# each retailer's own product URL (confirmed manually against the barcode).
-# ---------------------------------------------------------------------------
-PRODUCTS = [
-    {
-        "label": "Don Pepperoni Salami 200g",
-        "barcode": "93389389",
-        "woolworths_id": "64117",
-        "coles_id": "5643960",
-    },
-]
-
 RAPIDAPI_KEY = os.environ["RAPIDAPI_KEY"]
 GOOGLE_SA_KEY = os.environ["GOOGLE_SA_KEY"]
 SHEET_ID = os.environ.get("GOOGLE_SHEET_ID", "1e0xcBBg5moCatA1Wq6ija5Gu-wqXlYRD6951o_GD2RI")
-SHEET_TAB = os.environ.get("SHEET_TAB_NAME", "Sheet1")
+LOG_TAB = os.environ.get("SHEET_TAB_NAME", "Sheet1")
+PRODUCTS_TAB = os.environ.get("PRODUCTS_TAB_NAME", "Main")
 
 # Both retailers key their "price changes" feed by an Australian calendar day.
 # The job runs in UTC, so "yesterday" is computed in Sydney time to make sure
@@ -56,12 +49,48 @@ RETAILERS = {
 }
 
 
+def get_sheets_service():
+    creds_info = json.loads(GOOGLE_SA_KEY)
+    creds = Credentials.from_service_account_info(
+        creds_info, scopes=["https://www.googleapis.com/auth/spreadsheets"]
+    )
+    return build("sheets", "v4", credentials=creds)
+
+
+def load_products(service):
+    """Read tracked products from the 'Main' tab: A=name, B=category (unused),
+    C=Coles ID, D=Woolworths ID. Assumes row 1 is a header row."""
+    result = (
+        service.spreadsheets()
+        .values()
+        .get(spreadsheetId=SHEET_ID, range=f"{PRODUCTS_TAB}!A2:D")
+        .execute()
+    )
+    rows = result.get("values", [])
+
+    products = []
+    for row in rows:
+        row = row + [""] * (4 - len(row))  # pad short rows so unpacking is safe
+        name, _category, coles_id, woolworths_id = row[:4]
+        name = name.strip()
+        if not name:
+            continue
+        products.append(
+            {
+                "label": name,
+                "coles_id": coles_id.strip(),
+                "woolworths_id": woolworths_id.strip(),
+            }
+        )
+    return products
+
+
 def extract_id(url: str) -> str:
     """Pull the trailing numeric product ID off a retailer product URL."""
     return url.rstrip("/").split("/")[-1]
 
 
-def fetch_matches(retailer_name, retailer):
+def fetch_matches(retailer, products):
     headers = {
         "x-rapidapi-host": retailer["host"],
         "x-rapidapi-key": RAPIDAPI_KEY,
@@ -79,12 +108,9 @@ def fetch_matches(retailer_name, retailer):
 
         for entry in results:
             entry_id = extract_id(entry.get("url", ""))
-            entry_barcode = str(entry.get("barcode") or "")
-            for product in PRODUCTS:
-                target_id = product[retailer["id_field"]]
-                barcode_hit = entry_barcode and entry_barcode == product["barcode"]
-                id_hit = entry_id == target_id
-                if barcode_hit or id_hit:
+            for product in products:
+                target_id = product.get(retailer["id_field"], "")
+                if target_id and entry_id == target_id:
                     matches.append((product["label"], entry))
 
         total_pages = data.get("total_pages", page)
@@ -95,17 +121,12 @@ def fetch_matches(retailer_name, retailer):
     return matches
 
 
-def append_rows(rows):
+def append_rows(service, rows):
     if not rows:
         return
-    creds_info = json.loads(GOOGLE_SA_KEY)
-    creds = Credentials.from_service_account_info(
-        creds_info, scopes=["https://www.googleapis.com/auth/spreadsheets"]
-    )
-    service = build("sheets", "v4", credentials=creds)
     service.spreadsheets().values().append(
         spreadsheetId=SHEET_ID,
-        range=f"{SHEET_TAB}!A:H",
+        range=f"{LOG_TAB}!A:H",
         valueInputOption="USER_ENTERED",
         insertDataOption="INSERT_ROWS",
         body={"values": rows},
@@ -113,12 +134,21 @@ def append_rows(rows):
 
 
 def main():
+    service = get_sheets_service()
+    products = load_products(service)
+
+    if not products:
+        print(f"No products found in '{PRODUCTS_TAB}' tab -- nothing to check.")
+        return
+
+    print(f"Tracking {len(products)} product(s): {[p['label'] for p in products]}")
+
     all_rows = []
     had_error = False
 
     for retailer_name, retailer in RETAILERS.items():
         try:
-            matches = fetch_matches(retailer_name, retailer)
+            matches = fetch_matches(retailer, products)
         except requests.RequestException as exc:
             print(f"[{retailer_name}] request failed: {exc}", file=sys.stderr)
             had_error = True
@@ -142,7 +172,7 @@ def main():
             all_rows.append(row)
             print(f"[{retailer_name}] price change logged: {row}")
 
-    append_rows(all_rows)
+    append_rows(service, all_rows)
 
     if had_error:
         sys.exit(1)  # marks the Actions run as failed so you get notified
