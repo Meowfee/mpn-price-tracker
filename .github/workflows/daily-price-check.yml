@@ -15,5 +15,5 @@ jobs:
       - run: pip install requests google-api-python-client google-auth
       - run: python check_price.py
         env:
-          PRICE_API_KEY: ${{ secrets.RAPIDAPI_KEY }}
+          RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
           GOOGLE_SA_KEY: ${{ secrets.GOOGLE_SA_KEY }}
