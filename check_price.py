@@ -111,7 +111,7 @@ def fetch_matches(retailer, products):
             for product in products:
                 target_id = product.get(retailer["id_field"], "")
                 if target_id and entry_id == target_id:
-                    matches.append((product["label"], entry))
+                    matches.append((product["label"], entry, entry_id))
 
         total_pages = data.get("total_pages", page)
         if page >= total_pages or not results:
@@ -126,7 +126,7 @@ def append_rows(service, rows):
         return
     service.spreadsheets().values().append(
         spreadsheetId=SHEET_ID,
-        range=f"{LOG_TAB}!A:H",
+        range=f"{LOG_TAB}!A:E",
         valueInputOption="USER_ENTERED",
         insertDataOption="INSERT_ROWS",
         body={"values": rows},
@@ -158,16 +158,13 @@ def main():
             print(f"[{retailer_name}] no tracked product appeared in {QUERY_DATE}'s price changes.")
             continue
 
-        for label, entry in matches:
+        for _label, entry, product_code in matches:
             row = [
                 QUERY_DATE,
+                product_code,
                 retailer_name,
-                label,
-                entry.get("product_name", ""),
-                entry.get("barcode") or "",
                 entry.get("old_price", ""),
                 entry.get("new_price", ""),
-                entry.get("url", ""),
             ]
             all_rows.append(row)
             print(f"[{retailer_name}] price change logged: {row}")
